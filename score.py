@@ -3,6 +3,8 @@ import sys
 import json
 import logging
 import csv
+import requests
+import feedparser
 from pdf import PDFHandler
 from github import fetch_and_display_github_info
 from models import JSONResume, EvaluationData
@@ -17,6 +19,8 @@ from transform import (
     convert_blog_data_to_text,
 )
 from config import DEVELOPMENT_MODE
+from urllib.parse import urlparse
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -38,25 +42,39 @@ def print_evaluation_results(
         print("❌ No evaluation data available")
         return
 
-    # Calculate overall score
-    total_score = 0
-    max_score = 0
+    # Calculate raw totals
+    total_score = 0.0
+    max_score = 0.0
 
+    # accumulate category scores (from evaluation.scores)
     if hasattr(evaluation, "scores") and evaluation.scores:
         for category_name, category_data in evaluation.scores.model_dump().items():
-            total_score += category_data["score"]
-            max_score += category_data["max"]
+            score_val = float(category_data.get("score", 0))
+            max_val = float(category_data.get("max", 0))
+            # Treat technical_blog_writing as an additive (contribution) but NOT part of the 100-point denominator
+            # if category_name == "technical_blog_writing":
+            #     total_score += score_val
+            #     continue
+            total_score += score_val
+            max_score += max_val
 
-    # Add bonus points
+    # no separate blog_score handling needed: blog lives under scores.technical_blog_writing
+
+    # Add bonus points (include their max if provided)
     if hasattr(evaluation, "bonus_points") and evaluation.bonus_points:
-        total_score += evaluation.bonus_points.total
+        # add bonus to the numerator only (do not change denominator)
+        total_score += float(getattr(evaluation.bonus_points, "total", 0))
 
     # Subtract deductions
     if hasattr(evaluation, "deductions") and evaluation.deductions:
-        total_score -= evaluation.deductions.total
+        total_score -= float(getattr(evaluation.deductions, "total", 0))
 
-    # Overall Score
-    print(f"\n🎯 OVERALL SCORE: {total_score:.1f}/{max_score}")
+    # Normalize to 100-point scale for display
+    normalized_overall = 0.0
+    if max_score > 0:
+        normalized_overall = (total_score / max_score) * 100.0
+
+    print(f"\n🎯 OVERALL SCORE: {normalized_overall:.1f}/100")
 
     # Detailed Scores
     print("\n📈 DETAILED SCORES:")
@@ -89,13 +107,28 @@ def print_evaluation_results(
 
         # Technical Skills
         if (
-            hasattr(evaluation.scores, "technical_skills")
+            hasattr(evaluation, "scores") and evaluation.scores
+            and hasattr(evaluation.scores, "technical_skills")
             and evaluation.scores.technical_skills
         ):
             tech_score = evaluation.scores.technical_skills
             print(f"💻 Technical Skills:     {tech_score.score}/{tech_score.max}")
             print(f"   Evidence: {tech_score.evidence}")
             print()
+
+
+        # Blog Writing
+        if (
+            hasattr(evaluation, "scores") and evaluation.scores
+            and hasattr(evaluation.scores, "technical_blog_writing")
+            and evaluation.scores.technical_blog_writing
+        ):
+            blog_score = evaluation.scores.technical_blog_writing
+            print(f" Blog Writing:     {blog_score.score}/{blog_score.max}")
+            print(f"   Evidence: {blog_score.evidence}")
+            print()
+
+
 
     # Bonus Points
     if hasattr(evaluation, "bonus_points") and evaluation.bonus_points:
@@ -107,11 +140,11 @@ def print_evaluation_results(
     if (
         hasattr(evaluation, "deductions")
         and evaluation.deductions
-        and evaluation.deductions.total > 0
+        and getattr(evaluation.deductions, "total", 0) > 0
     ):
         print(f"\n⚠️  DEDUCTIONS: -{evaluation.deductions.total}")
         print("-" * 30)
-        if evaluation.deductions.reasons:
+        if getattr(evaluation.deductions, "reasons", None):
             print(f"   {evaluation.deductions.reasons}")
 
     # Key Strengths
@@ -131,14 +164,94 @@ def print_evaluation_results(
         for i, area in enumerate(evaluation.areas_for_improvement, 1):
             print(f"  {i}. {area}")
 
+    # Blog Analysis block already printed above if present
     print("\n" + "=" * 80)
+
+
+def find_blog_url_in_profiles(profiles):
+    if not profiles:
+        return None
+    for p in profiles:
+        url = p.get("url") if isinstance(p, dict) else getattr(p, "url", None)
+        username = (p.get("username") if isinstance(p, dict) else getattr(p, "username", None)) or ""
+        network = (p.get("network") if isinstance(p, dict) else getattr(p, "network", None)) or ""
+        # direct label match
+        if network and "blog" in network.lower():
+            return url
+        # domain detection
+        if url and any(d in url.lower() for d in ("hashnode", "medium.com", "dev.to", "blog.")):
+            return url
+        # username that looks like host
+        if username and any(d in username.lower() for d in ("hashnode", "medium", "dev", "blog")):
+            if username.startswith("http"):
+                return username
+    return None
+
+
+def fetch_blog_data_from_url(url, max_posts=10, timeout=8):
+    """Try RSS first, fallback to feedparser on url, produce normalized dict."""
+    if not url:
+        return None
+    try:
+        # try common rss endpoints
+        candidates = [url.rstrip("/") + p for p in ("/rss.xml", "/feed.xml", "/rss", "/atom.xml", "/feeds/latest")]
+        feed = None
+        for c in candidates:
+            try:
+                f = feedparser.parse(c)
+                if getattr(f, "entries", None):
+                    feed = f
+                    source = c
+                    break
+            except Exception:
+                continue
+        if not feed:
+            f = feedparser.parse(url)
+            if getattr(f, "entries", None):
+                feed = f
+                source = url
+        posts = []
+        if feed and getattr(feed, "entries", None):
+            for e in feed.entries[:max_posts]:
+                posts.append(
+                    {
+                        "title": e.get("title", ""),
+                        "url": e.get("link", ""),
+                        "summary": e.get("summary", "") or e.get("description", ""),
+                        "published": e.get("published", "") or e.get("updated", ""),
+                    }
+                )
+            return {"source": source, "count": len(posts), "posts": posts}
+    except Exception:
+        pass
+
+    # fallback: do a simple GET and capture first few links/titles
+    try:
+        r = requests.get(url, timeout=timeout)
+        r.raise_for_status()
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        # heuristics: article links or h2/h3 titles linking to posts
+        links = []
+        for a in soup.select("a[href]"):
+            href = a["href"]
+            text = a.get_text(" ", strip=True)
+            if ("/post/" in href or "/blog/" in href or href.endswith(".html")) and href not in links:
+                full = href if href.startswith("http") else requests.compat.urljoin(url, href)
+                links.append((text, full))
+            if len(links) >= max_posts:
+                break
+        posts = [{"title": t or u, "url": u, "excerpt": ""} for t, u in links]
+        return {"source": url, "count": len(posts), "posts": posts}
+    except Exception:
+        return None
 
 
 def _evaluate_resume(
     resume_data: JSONResume, github_data: dict = None, blog_data: dict = None
 ) -> Optional[EvaluationData]:
     """Evaluate the resume using AI and display results."""
-
     model_params = MODEL_PARAMETERS.get(DEFAULT_MODEL)
     evaluator = ResumeEvaluator(model_name=DEFAULT_MODEL, model_params=model_params)
 
@@ -158,7 +271,12 @@ def _evaluate_resume(
     # Evaluate the enhanced resume
     evaluation_result = evaluator.evaluate_resume(resume_text)
 
-    # print(evaluation_result)
+    # attach blog_data so print_evaluation_results can show it later
+    if blog_data:
+        try:
+            evaluation_result.blog_data = blog_data
+        except Exception:
+            pass
 
     return evaluation_result
 
@@ -180,6 +298,9 @@ def main(pdf_path):
     github_cache_filename = (
         f"cache/githubcache_{os.path.basename(pdf_path).replace('.pdf', '')}.json"
     )
+    blog_cache_filename = (
+        f"cache/blogcache_{os.path.basename(pdf_path).replace('.pdf', '')}.json"
+    )
 
     # Check if cache exists and we're in development mode
     if DEVELOPMENT_MODE and os.path.exists(cache_filename):
@@ -199,7 +320,7 @@ def main(pdf_path):
                 json.dumps(resume_data.model_dump(), indent=2, ensure_ascii=False)
             )
 
-    # Check if cache exists and we're in development mode
+    # GitHub data fetching (unchanged)
     github_data = {}
     if DEVELOPMENT_MODE and os.path.exists(github_cache_filename):
         print(f"Loading cached data from {github_cache_filename}")
@@ -210,7 +331,6 @@ def main(pdf_path):
             + (" and caching to " + github_cache_filename if DEVELOPMENT_MODE else "")
         )
 
-        # Add validation to handle None values
         profiles = []
         if resume_data and hasattr(resume_data, "basics") and resume_data.basics:
             profiles = resume_data.basics.profiles or []
@@ -224,7 +344,29 @@ def main(pdf_path):
                 json.dumps(github_data, indent=2, ensure_ascii=False)
             )
 
-    score = _evaluate_resume(resume_data, github_data)
+    # BLOG data: load cache if present, else detect blog url and fetch
+    blog_data = None
+    if DEVELOPMENT_MODE and os.path.exists(blog_cache_filename):
+        print(f"Loading cached blog data from {blog_cache_filename}")
+        try:
+            blog_data = json.loads(Path(blog_cache_filename).read_text())
+        except Exception:
+            blog_data = None
+    else:
+        profiles = []
+        if resume_data and getattr(resume_data, "basics", None):
+            profiles = getattr(resume_data.basics, "profiles", []) or []
+        blog_url = find_blog_url_in_profiles(profiles)
+        if blog_url:
+            print(f"Fetching blog data from {blog_url}")
+            blog_data = fetch_blog_data_from_url(blog_url)
+            if DEVELOPMENT_MODE and blog_data:
+                os.makedirs(os.path.dirname(blog_cache_filename), exist_ok=True)
+                Path(blog_cache_filename).write_text(
+                    json.dumps(blog_data, indent=2, ensure_ascii=False)
+                )
+
+    score = _evaluate_resume(resume_data, github_data, blog_data)
 
     # Get candidate name for display
     candidate_name = os.path.basename(pdf_path).replace(".pdf", "")

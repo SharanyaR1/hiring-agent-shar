@@ -226,6 +226,7 @@ class Scores(BaseModel):
     self_projects: CategoryScore
     production: CategoryScore
     technical_skills: CategoryScore
+    technical_blog_writing: CategoryScore
 
 
 class BonusPoints(BaseModel):

@@ -922,17 +922,47 @@ def convert_github_data_to_text(github_data: dict) -> str:
 
 
 def convert_blog_data_to_text(blog_data: dict) -> str:
-    blog_text = "\n\n=== BLOG DATA ===\n"
-    blog_text += f"Total Blogs Found: {blog_data.get('total_blogs', 'N/A')}\n"
-    blog_text += f"Blog Score: {blog_data.get('blog_score', 'N/A')}/10.0\n"
-    blog_text += f"Blog Details: {blog_data.get('blog_details', 'N/A')}\n"
+    """
+    Normalize various blog_data shapes into a readable text block.
+    Handles structures like:
+      - {"source": "...", "count": N, "posts": [...]}
+      - {"total_blogs": N, "blog_score": x, "blogs": [...]}
+      - {"source": "...", "posts": [{"title":..., "url":..., "excerpt":..., "published":...}, ...]}
+    """
+    if not blog_data:
+        return "\n\n=== BLOG DATA ===\nNo blog data available.\n"
 
-    if "blogs" in blog_data:
-        blog_text += "\nBlog URLs Found:\n"
-        for i, blog in enumerate(blog_data["blogs"][:5], 1):
-            blog_text += f"{i}. {blog.get('url', 'N/A')}\n"
-            blog_text += f"   Score: {blog.get('score', 'N/A')}/10.0\n"
-            blog_text += f"   Details: {blog.get('details', 'N/A')}\n"
-            blog_text += "\n"
+    blog_text = "\n\n=== BLOG DATA ===\n"
+    source = blog_data.get("source") or blog_data.get("source_url") or blog_data.get("url")
+    count = blog_data.get("count") or blog_data.get("total_blogs") or len(blog_data.get("posts", []))
+    score = blog_data.get("blog_score") or blog_data.get("score") or blog_data.get("blog_rating")
+
+    if source:
+        blog_text += f"Source: {source}\n"
+    blog_text += f"Total Blogs Found: {count}\n"
+    if score is not None:
+        blog_text += f"Blog Score: {score}/5.0\n"
+
+    # details / posts
+    details = blog_data.get("posts") or blog_data.get("blogs") or blog_data.get("details")
+    if details:
+        blog_text += "\nBlog Entries (sample):\n"
+        for i, item in enumerate(details[:5], 1):
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("name") or ""
+                url = item.get("url") or item.get("link") or ""
+                excerpt = item.get("excerpt") or item.get("summary") or item.get("details") or ""
+                published = item.get("published") or item.get("date") or ""
+                blog_text += f"{i}. {title or url}\n"
+                if url:
+                    blog_text += f"   URL: {url}\n"
+                if published:
+                    blog_text += f"   Published: {published}\n"
+                if excerpt:
+                    blog_text += f"   Excerpt: {excerpt[:200]}\n"
+            else:
+                blog_text += f"{i}. {str(item)}\n"
+    else:
+        blog_text += f"Blog Details: {blog_data.get('blog_details','N/A')}\n"
 
     return blog_text

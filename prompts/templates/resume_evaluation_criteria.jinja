@@ -155,7 +155,8 @@ Analyze the following resume and provide a JSON response with this EXACT structu
         "open_source": {"score": 0, "max": 35, "evidence": "string"},
         "self_projects": {"score": 0, "max": 30, "evidence": "string"},
         "production": {"score": 0, "max": 25, "evidence": "string"},
-        "technical_skills": {"score": 0, "max": 10, "evidence": "string"}
+        "technical_skills": {"score": 0, "max": 10, "evidence": "string"},
+        "technical_blog_writing": {"score": 0, "max": 10, "evidence": "string"}
     },
     "bonus_points": {"total": 0, "breakdown": "string"},
     "deductions": {"total": 0, "reasons": "string"},
@@ -166,3 +167,13 @@ Analyze the following resume and provide a JSON response with this EXACT structu
 Resume to evaluate:
 
 {{ text_content }}
+
+## BLOG DATA (if present)
+- If an "=== BLOG DATA ===" block is present in the resume text, analyze the candidate's blog posts for:
+  - technical depth, topics covered, writing quality, and posting frequency.
+- Return these two fields inside the JSON response when blog data exists:
+  - "blog_analysis": short text describing the analysis
+  - "blog_score": integer numeric score (0-5) — MUST be an integer between 0 and 5 inclusive
+- Example JSON addition:
+  "blog_analysis": "Short analysis text...",
+  "blog_score": 5
